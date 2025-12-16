@@ -16,8 +16,8 @@ pub mod types;
 
 pub use config::DexConfig;
 pub use order::{Order, OrderId, OrderSide, OrderStatus, OrderType};
-pub use orderbook::OrderBook;
+pub use orderbook::{OrderBook, OrderError};
 pub use pair::{Pair, PairId};
-pub use pool_manager::PoolManager;
+pub use pool_manager::{PoolManager, PoolError};
 pub use router::{Quote, Route, RouteHop};
 pub use types::{Address, Amount, Price, TokenId, U256, ETH_TOKEN};
