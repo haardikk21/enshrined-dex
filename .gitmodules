@@ -1,9 +1,3 @@
-[submodule "op-rbuilder"]
-	path = op-rbuilder
-	url = git@github.com:haardikk21/op-rbuilder.git
-[submodule "builder-playground"]
-	path = builder-playground
-	url = git@github.com:haardikk21/builder-playground.git
 [submodule "contracts/lib/forge-std"]
 	path = contracts/lib/forge-std
 	url = https://github.com/foundry-rs/forge-std
