@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { getTransaction, getTransactionReceipt, getBlock, formatValue, formatGas } from '@/lib/rpc'
+import { LogDisplay } from '@/components/LogDisplay'
 
 export const dynamic = 'force-dynamic'
 
@@ -198,39 +199,7 @@ export default async function TransactionPage({ params }: PageProps) {
             <div className="px-6 py-6">
               <div className="space-y-4">
                 {receipt.logs.map((log, index) => (
-                  <div key={index} className="border border-white/10 rounded-xl p-4 bg-white/5">
-                    <div className="text-sm font-medium text-white mb-3">
-                      Log #{index}
-                    </div>
-                    <dl className="space-y-3">
-                      <div>
-                        <dt className="text-xs font-medium text-white/50 mb-1">Address</dt>
-                        <dd className="text-xs text-white/90 font-mono break-all">
-                          {log.address}
-                        </dd>
-                      </div>
-                      {log.topics && log.topics.length > 0 && (
-                        <div>
-                          <dt className="text-xs font-medium text-white/50 mb-1">Topics</dt>
-                          <dd className="text-xs text-white/90 font-mono space-y-1">
-                            {log.topics.map((topic, i) => (
-                              <div key={i} className="break-all">
-                                [{i}] {topic}
-                              </div>
-                            ))}
-                          </dd>
-                        </div>
-                      )}
-                      {log.data && log.data !== '0x' && (
-                        <div>
-                          <dt className="text-xs font-medium text-white/50 mb-1">Data</dt>
-                          <dd className="text-xs text-white/90 font-mono break-all bg-black/30 p-2 rounded">
-                            {log.data}
-                          </dd>
-                        </div>
-                      )}
-                    </dl>
-                  </div>
+                  <LogDisplay key={index} log={log} index={index} />
                 ))}
               </div>
             </div>

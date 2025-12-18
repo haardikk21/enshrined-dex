@@ -65,6 +65,7 @@ pub struct Quote {
 }
 
 /// Router for finding paths between tokens.
+#[derive(Debug)]
 pub struct Router {
     /// Graph of token connections.
     /// Maps each token to a set of tokens it can be traded with directly.

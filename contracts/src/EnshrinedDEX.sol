@@ -47,17 +47,17 @@ interface IEnshrinedDEX {
     );
 
     // Errors
-    error PairAlreadyExists();
-    error PairDoesNotExist();
-    error InvalidTokenAddress();
-    error InvalidAmount();
-    error InvalidPrice();
-    error OrderNotFound();
-    error Unauthorized();
-    error NotWhitelisted();
-    error SlippageExceeded();
-    error InsufficientBalance();
-    error NoRouteFound();
+    error PairAlreadyExists(address token0, address token1, bytes32 pairId);
+    error PairDoesNotExist(address token0, address token1, bytes32 pairId);
+    error InvalidTokenAddress(address token);
+    error InvalidAmount(uint256 amount);
+    error InvalidPrice(uint256 priceNum, uint256 priceDenom);
+    error OrderNotFound(bytes32 orderId);
+    error Unauthorized(address caller);
+    error NotWhitelisted(address caller);
+    error SlippageExceeded(uint256 amountOut, uint256 minAmountOut);
+    error InsufficientBalance(address account, uint256 required, uint256 available);
+    error NoRouteFound(address tokenIn, address tokenOut);
 
     // Core DEX Functions
 

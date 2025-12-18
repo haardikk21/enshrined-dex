@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 /// The main DEX pool manager.
 /// Manages all trading pairs and provides routing for trades.
+#[derive(Debug)]
 pub struct PoolManager {
     /// Configuration for the DEX.
     config: DexConfig,
@@ -50,21 +51,48 @@ impl PoolManager {
     /// Create a new trading pair.
     /// Returns the pair if created, or an error if it already exists.
     pub fn create_pair(&mut self, base: TokenId, quote: TokenId) -> Result<Pair, PoolError> {
+        println!("=== PoolManager::create_pair called ===");
+        println!("Input: base={:?}, quote={:?}", base, quote);
+
         if base == quote {
+            println!("ERROR: base == quote, returning InvalidPair");
             return Err(PoolError::InvalidPair);
         }
 
         let pair = Pair::new(base, quote);
         let pair_id = pair.id();
 
+        println!(
+            "Created Pair object: base={:?}, quote={:?}",
+            pair.base, pair.quote
+        );
+        println!("Pair ID: {:?}", pair_id);
+        println!("Current orderbooks count: {}", self.orderbooks.len());
+        println!("Checking if pair_id exists in orderbooks...");
+
         if self.orderbooks.contains_key(&pair_id) {
-            return Err(PoolError::PairAlreadyExists);
+            println!("ERROR: Pair already exists!");
+            println!("Existing pairs in orderbooks:");
+            for (existing_pair_id, book) in &self.orderbooks {
+                println!(
+                    "  - pair_id={:?}, base={:?}, quote={:?}",
+                    existing_pair_id, book.pair.base, book.pair.quote
+                );
+            }
+            return Err(PoolError::PairAlreadyExists {
+                token0: base,
+                token1: quote,
+                pair_id,
+            });
         }
+
+        println!("Pair does not exist, creating new orderbook");
 
         // Create the orderbook
         self.orderbooks.insert(pair_id, OrderBook::new(pair));
 
         // Update token index
+        println!("Updating token_pairs index");
         self.token_pairs
             .entry(base)
             .or_insert_with(HashSet::new)
@@ -75,7 +103,11 @@ impl PoolManager {
             .insert(pair_id);
 
         // Update router
+        println!("Updating router");
         self.router.add_pair(pair);
+
+        println!("Pair created successfully!");
+        println!("Final orderbooks count: {}", self.orderbooks.len());
 
         Ok(pair)
     }
@@ -130,10 +162,15 @@ impl PoolManager {
         amount: Amount,
     ) -> Result<(OrderId, TradeResult), PoolError> {
         let pair = Pair::new(base, quote);
+        let pair_id = pair.id();
         let orderbook = self
             .orderbooks
-            .get_mut(&pair.id())
-            .ok_or(PoolError::PairNotFound)?;
+            .get_mut(&pair_id)
+            .ok_or(PoolError::PairNotFound {
+                token0: base,
+                token1: quote,
+                pair_id,
+            })?;
 
         orderbook
             .place_limit_order(trader, side, price, amount, &self.config)
@@ -150,10 +187,15 @@ impl PoolManager {
         amount: Amount,
     ) -> Result<TradeResult, PoolError> {
         let pair = Pair::new(base, quote);
+        let pair_id = pair.id();
         let orderbook = self
             .orderbooks
-            .get_mut(&pair.id())
-            .ok_or(PoolError::PairNotFound)?;
+            .get_mut(&pair_id)
+            .ok_or(PoolError::PairNotFound {
+                token0: base,
+                token1: quote,
+                pair_id,
+            })?;
 
         orderbook
             .place_market_order(trader, side, amount, &self.config)
@@ -168,10 +210,15 @@ impl PoolManager {
         order_id: OrderId,
     ) -> Result<(), PoolError> {
         let pair = Pair::new(base, quote);
+        let pair_id = pair.id();
         let orderbook = self
             .orderbooks
-            .get_mut(&pair.id())
-            .ok_or(PoolError::PairNotFound)?;
+            .get_mut(&pair_id)
+            .ok_or(PoolError::PairNotFound {
+                token0: base,
+                token1: quote,
+                pair_id,
+            })?;
 
         orderbook
             .cancel_order(order_id)
@@ -237,7 +284,10 @@ impl PoolManager {
                 }],
             },
             price_impact: self.calculate_price_impact(&orderbook, token_in, amount_in),
-            total_fee: U256::from(self.config.calculate_fee(amount_out.try_into().unwrap_or(u128::MAX))),
+            total_fee: U256::from(
+                self.config
+                    .calculate_fee(amount_out.try_into().unwrap_or(u128::MAX)),
+            ),
         })
     }
 
@@ -295,7 +345,10 @@ impl PoolManager {
                 orderbook.simulate_market_buy(current_amount, &self.config)?
             };
 
-            let hop_fee = U256::from(self.config.calculate_fee(amount_out.try_into().unwrap_or(u128::MAX)));
+            let hop_fee = U256::from(
+                self.config
+                    .calculate_fee(amount_out.try_into().unwrap_or(u128::MAX)),
+            );
             total_fee = total_fee.saturating_add(hop_fee);
             current_amount = amount_out;
         }
@@ -385,7 +438,11 @@ impl PoolManager {
             let orderbook = self
                 .orderbooks
                 .get_mut(&pair_id)
-                .ok_or(PoolError::PairNotFound)?;
+                .ok_or(PoolError::PairNotFound {
+                    token0: hop.pair.base,
+                    token1: hop.pair.quote,
+                    pair_id,
+                })?;
 
             let side = if orderbook.pair.base == hop.token_in {
                 OrderSide::Sell
@@ -460,9 +517,17 @@ pub struct SwapResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoolError {
     /// The trading pair already exists.
-    PairAlreadyExists,
+    PairAlreadyExists {
+        token0: TokenId,
+        token1: TokenId,
+        pair_id: PairId,
+    },
     /// The trading pair was not found.
-    PairNotFound,
+    PairNotFound {
+        token0: TokenId,
+        token1: TokenId,
+        pair_id: PairId,
+    },
     /// Invalid pair (e.g., same token on both sides).
     InvalidPair,
     /// Invalid amount.
@@ -480,8 +545,28 @@ pub enum PoolError {
 impl std::fmt::Display for PoolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PoolError::PairAlreadyExists => write!(f, "pair already exists"),
-            PoolError::PairNotFound => write!(f, "pair not found"),
+            PoolError::PairAlreadyExists {
+                token0,
+                token1,
+                pair_id,
+            } => {
+                write!(
+                    f,
+                    "pair already exists: token0={:?}, token1={:?}, pair_id={:?}",
+                    token0, token1, pair_id
+                )
+            }
+            PoolError::PairNotFound {
+                token0,
+                token1,
+                pair_id,
+            } => {
+                write!(
+                    f,
+                    "pair not found: token0={:?}, token1={:?}, pair_id={:?}",
+                    token0, token1, pair_id
+                )
+            }
             PoolError::InvalidPair => write!(f, "invalid pair"),
             PoolError::InvalidAmount => write!(f, "invalid amount"),
             PoolError::NoRouteFound => write!(f, "no route found"),
@@ -522,11 +607,14 @@ mod tests {
         // Can't create duplicate
         assert!(matches!(
             pm.create_pair(eth, usdc),
-            Err(PoolError::PairAlreadyExists)
+            Err(PoolError::PairAlreadyExists { .. })
         ));
 
         // Can't create with same token
-        assert!(matches!(pm.create_pair(eth, eth), Err(PoolError::InvalidPair)));
+        assert!(matches!(
+            pm.create_pair(eth, eth),
+            Err(PoolError::InvalidPair)
+        ));
     }
 
     #[test]

@@ -12,7 +12,12 @@ interface PageProps {
 
 export default async function BlockPage({ params }: PageProps) {
   const { hash } = await params
-  const block = await getBlock(hash)
+
+  // Determine if the parameter is a block hash (starts with 0x) or block number
+  const isBlockHash = hash.startsWith('0x')
+  const blockIdentifier = isBlockHash ? hash : BigInt(hash)
+
+  const block = await getBlock(blockIdentifier)
 
   if (!block) {
     notFound()
