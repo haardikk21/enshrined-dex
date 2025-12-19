@@ -93,16 +93,51 @@ export function getEventDescription(eventName: string, args: Record<string, unkn
 
       case 'LimitOrderPlaced': {
         const tokenIn = args.tokenIn
+        const tokenOut = args.tokenOut
         const amount = args.amount
-        if (typeof tokenIn === 'string' && typeof amount === 'bigint') {
-          const formattedAmount = formatTokenAmount(amount, tokenIn)
-          return `Limit order placed: ${args.isBuy ? 'Buy' : 'Sell'} ${formattedAmount} ${formatAddressForDescription(tokenIn)}`
+        const priceNum = args.priceNum
+        const priceDenom = args.priceDenom
+
+        if (typeof tokenIn === 'string' && typeof tokenOut === 'string' &&
+            typeof amount === 'bigint' && typeof priceNum === 'bigint' &&
+            typeof priceDenom === 'bigint') {
+          const formattedAmountIn = formatTokenAmount(amount, tokenIn)
+          const tokenInName = formatAddressForDescription(tokenIn)
+          const tokenOutName = formatAddressForDescription(tokenOut)
+
+          // Calculate the output amount: for buy orders, amount is in tokenIn (quote),
+          // need to convert to tokenOut (base) using: base = quote * priceDenom / priceNum
+          let outputAmount: bigint
+          try {
+            outputAmount = (amount * priceDenom) / priceNum
+          } catch {
+            // Fallback if calculation fails
+            return `Limit order placed: ${args.isBuy ? 'Buy' : 'Sell'} ${tokenOutName} for ${formattedAmountIn} ${tokenInName}`
+          }
+
+          const formattedOutputAmount = formatTokenAmount(outputAmount, tokenOut as string)
+
+          if (args.isBuy) {
+            return `Limit order placed: Buy ${formattedOutputAmount} ${tokenOutName} for ${formattedAmountIn} ${tokenInName}`
+          } else {
+            return `Limit order placed: Sell ${formattedAmountIn} ${tokenInName} for ${formattedOutputAmount} ${tokenOutName}`
+          }
         }
         return `Limit order placed: ${args.isBuy ? 'Buy' : 'Sell'}`
       }
 
       case 'OrderCancelled':
         return `Order cancelled by ${formatAddressForDescription(args.trader)}`
+
+      case 'OrderFilled': {
+        const makerOrderId = args.makerOrderId
+        const takerOrderId = args.takerOrderId
+        const amount = args.amount
+        if (typeof makerOrderId === 'string' && typeof takerOrderId === 'string' && typeof amount === 'bigint') {
+          return `Order filled: Maker ${makerOrderId.slice(0, 10)}... × Taker ${takerOrderId.slice(0, 10)}... (${amount.toString()} base)`
+        }
+        return 'Order filled'
+      }
 
       case 'Swap': {
         const tokenIn = args.tokenIn

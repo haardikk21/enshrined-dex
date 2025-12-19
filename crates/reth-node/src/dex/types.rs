@@ -3,6 +3,7 @@
 use crate::selectors::DexToken;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall;
+use dex::orderbook::Fill;
 
 /// A token transfer to be executed via protocolTransfer.
 #[derive(Debug, Clone)]
@@ -49,6 +50,8 @@ pub enum DexResult {
         price_denom: U256,
         /// Token transfers for escrowing collateral.
         transfers: Vec<TokenTransfer>,
+        /// Fills that occurred immediately when placing this order
+        fills: Vec<Fill>,
     },
     OrderCancelled {
         order_id: B256,
@@ -63,6 +66,8 @@ pub enum DexResult {
         route: Vec<B256>,
         /// Token transfers for the swap.
         transfers: Vec<TokenTransfer>,
+        /// All fills from all hops
+        all_fills: Vec<(dex::OrderId, Fill)>,
     },
     #[allow(dead_code)]
     Quote {

@@ -124,3 +124,20 @@ export function formatGas(gas: bigint): string {
 export function formatValue(value: bigint): string {
   return `${formatEther(value)} ETH`;
 }
+
+export async function getDexLogs(
+  address: string,
+  fromBlock: bigint = 0n,
+): Promise<any[]> {
+  try {
+    const logs = await client.getLogs({
+      address: address as `0x${string}`,
+      fromBlock,
+      toBlock: 'latest',
+    });
+    return logs;
+  } catch (error) {
+    console.error("Error fetching DEX logs:", error);
+    return [];
+  }
+}

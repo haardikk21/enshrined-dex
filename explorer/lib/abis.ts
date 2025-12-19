@@ -36,6 +36,16 @@ export const ENSHRINED_DEX_ABI = [
   },
   {
     "type": "event",
+    "name": "OrderFilled",
+    "inputs": [
+      { "name": "makerOrderId", "type": "bytes32", "indexed": true },
+      { "name": "takerOrderId", "type": "bytes32", "indexed": true },
+      { "name": "amount", "type": "uint256", "indexed": false }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "Swap",
     "inputs": [
       { "name": "trader", "type": "address", "indexed": true },

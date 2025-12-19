@@ -4,11 +4,11 @@ default:
 
 run:
     rm -rf ./dex-reth && \
-        RUST_LOG=dex=debug,payload_builder=info \
+        RUST_LOG=dex=debug,payload_builder=debug \
         cargo run -p reth-node -- node \
         --datadir ./dex-reth \
         --dev \
-        --dev.block-time 200ms \
+        --dev.block-time 1s \
         -vvv
 
 run-script:

@@ -184,7 +184,7 @@ impl DexHandler {
         };
 
         let mut pm = self.pool_manager.write();
-        let (order_id, _trade_result) = pm
+        let (order_id, trade_result) = pm
             .place_limit_order(base, quote, caller, side, price, base_amount)
             .map_err(DexError::from)?;
 
@@ -207,6 +207,7 @@ impl DexHandler {
             token_out = ?token_out,
             is_buy = is_buy,
             amount = ?amount,
+            fills = trade_result.fills.len(),
             "Limit order placed with escrow"
         );
 
@@ -220,6 +221,7 @@ impl DexHandler {
             price_num,
             price_denom,
             transfers,
+            fills: trade_result.fills,
         })
     }
 
@@ -314,6 +316,9 @@ impl DexHandler {
             amount: result.amount_out,
         });
 
+        // Collect all fills for OrderFilled events
+        let mut all_fills = Vec::new();
+
         // For each hop and fill, determine the correct amount to send to maker
         for (hop, trade) in result.route.hops.iter().zip(&result.trades) {
             // Determine which side the taker was on
@@ -321,6 +326,9 @@ impl DexHandler {
             let taker_is_selling_base = hop.pair.base == hop.token_in;
 
             for fill in &trade.fills {
+                // Store fills with their taker order IDs for OrderFilled events
+                all_fills.push((trade.taker_order_id, fill.clone()));
+
                 // Maker receives the opposite of what taker is doing:
                 // - If taker sells base (base=token_in), maker receives base_amount (token_in)
                 // - If taker buys base (base=token_out, quote=token_in), maker receives quote_amount (token_in)
@@ -346,6 +354,7 @@ impl DexHandler {
             amount_in = ?amount_in,
             amount_out = ?result.amount_out,
             hops = route.len(),
+            fills = all_fills.len(),
             transfers = transfers.len(),
             "Swap executed successfully"
         );
@@ -358,6 +367,7 @@ impl DexHandler {
             amount_out: result.amount_out,
             route,
             transfers,
+            all_fills,
         })
     }
 
@@ -422,6 +432,7 @@ impl DexHandler {
                 price_num,
                 price_denom,
                 transfers: _,
+                fills,
             } => {
                 // Non-indexed params: (address tokenOut, bool isBuy, uint256 amount, uint256 priceNum, uint256 priceDenom)
                 let data = (*token_out, *is_buy, *amount, *price_num, *price_denom).abi_encode();
@@ -437,6 +448,26 @@ impl DexHandler {
                         data.into(),
                     ),
                 });
+
+                // Emit OrderFilled events for any fills that occurred
+                for fill in fills {
+                    let mut maker_order_bytes = [0u8; 32];
+                    maker_order_bytes[24..32].copy_from_slice(&fill.maker_order_id.0.to_be_bytes());
+                    let maker_order_id = B256::from(maker_order_bytes);
+
+                    let data = (fill.base_amount,).abi_encode();
+                    logs.push(Log {
+                        address: DEX_PREDEPLOY_ADDRESS,
+                        data: alloy_primitives::LogData::new_unchecked(
+                            vec![
+                                EnshrinedDEX::OrderFilled::SIGNATURE_HASH.into(),
+                                maker_order_id,
+                                *order_id, // taker order ID
+                            ],
+                            data.into(),
+                        ),
+                    });
+                }
             }
             DexResult::OrderCancelled { order_id, trader } => {
                 logs.push(Log {
@@ -459,7 +490,32 @@ impl DexHandler {
                 amount_out,
                 route,
                 transfers: _,
+                all_fills,
             } => {
+                // Emit OrderFilled events for all fills
+                for (taker_order_id, fill) in all_fills {
+                    let mut maker_order_bytes = [0u8; 32];
+                    maker_order_bytes[24..32].copy_from_slice(&fill.maker_order_id.0.to_be_bytes());
+                    let maker_order_id_b256 = B256::from(maker_order_bytes);
+
+                    let mut taker_order_bytes = [0u8; 32];
+                    taker_order_bytes[24..32].copy_from_slice(&taker_order_id.0.to_be_bytes());
+                    let taker_order_id_b256 = B256::from(taker_order_bytes);
+
+                    let data = (fill.base_amount,).abi_encode();
+                    logs.push(Log {
+                        address: DEX_PREDEPLOY_ADDRESS,
+                        data: alloy_primitives::LogData::new_unchecked(
+                            vec![
+                                EnshrinedDEX::OrderFilled::SIGNATURE_HASH.into(),
+                                maker_order_id_b256,
+                                taker_order_id_b256,
+                            ],
+                            data.into(),
+                        ),
+                    });
+                }
+
                 // Non-indexed params: (uint256 amountIn, uint256 amountOut, bytes32[] route)
                 // Manually encode to avoid tuple wrapper offset
                 let mut data = Vec::new();

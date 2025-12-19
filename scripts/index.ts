@@ -7,10 +7,11 @@ import {
   formatUnits,
   encodeAbiParameters,
   parseAbiParameters,
-  encodeFunctionData,
   defineChain,
   type Hex,
   type Address,
+  type WalletClient,
+  type PublicClient,
 } from "viem";
 import {
   mnemonicToAccount,
@@ -19,6 +20,13 @@ import {
 } from "viem/accounts";
 import { readFileSync } from "fs";
 import { join } from "path";
+
+// ============================================================================
+// Constants and Configuration
+// ============================================================================
+
+const DEX_ADDRESS = "0x4200000000000000000000000000000000000042" as Address;
+const ETH_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 
 // Load DexToken artifact
 const dexTokenArtifact = JSON.parse(
@@ -37,13 +45,13 @@ const rethDev = defineChain({
   rpcUrls: {
     default: { http: ["http://localhost:8545"] },
   },
+  blockTime: 500,
 });
 
-// Constants
-const DEX_ADDRESS = "0x4200000000000000000000000000000000000042" as Address;
-const ETH_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
-
+// ============================================================================
 // ABIs
+// ============================================================================
+
 const DexToken_ABI = [
   {
     type: "constructor",
@@ -61,6 +69,16 @@ const DexToken_ABI = [
       { name: "amount", type: "uint256" },
     ],
     outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    type: "function",
+    name: "approve",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ type: "bool" }],
     stateMutability: "nonpayable",
   },
   {
@@ -111,6 +129,164 @@ const DEX_ABI = [
   },
 ] as const;
 
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+interface TokenConfig {
+  name: string;
+  symbol: string;
+  decimals: number;
+}
+
+interface DeployedToken {
+  address: Address;
+  config: TokenConfig;
+  deployHash: Hex;
+}
+
+/**
+ * Deploy a DexToken contract
+ */
+async function deployToken(
+  client: WalletClient,
+  publicClient: PublicClient,
+  config: TokenConfig,
+): Promise<DeployedToken> {
+  const constructorArgs = encodeAbiParameters(
+    parseAbiParameters("string, string, uint8"),
+    [config.name, config.symbol, config.decimals],
+  );
+  const deployData = (DEX_TOKEN_BYTECODE + constructorArgs.slice(2)) as Hex;
+
+  const deployHash = await client.sendTransaction({ data: deployData });
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash: deployHash,
+  });
+
+  return {
+    address: receipt.contractAddress!,
+    config,
+    deployHash,
+  };
+}
+
+interface OrderParams {
+  tokenIn: Address;
+  tokenOut: Address;
+  isBuy: boolean;
+  priceRange: { min: number; max: number };
+  orderSize: number; // in base token units (e.g., ETH)
+  count: number;
+  tokenInDecimals: number;
+}
+
+/**
+ * Place multiple limit orders across a price range
+ */
+async function placeOrderBatch(
+  client: WalletClient,
+  publicClient: PublicClient,
+  params: OrderParams,
+): Promise<void> {
+  const {
+    tokenIn,
+    tokenOut,
+    isBuy,
+    priceRange,
+    orderSize,
+    count,
+    tokenInDecimals,
+  } = params;
+  const hashes: Hex[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const price =
+      priceRange.min + ((priceRange.max - priceRange.min) * i) / (count - 1);
+    const priceNum = BigInt(Math.floor(price * Math.pow(10, tokenInDecimals)));
+    const priceDenom = 10n ** 18n; // Assuming ETH (18 decimals) as base
+
+    let amount: bigint;
+    let value: bigint = 0n;
+
+    if (isBuy) {
+      // Buying: amount is in tokenIn (what we're paying)
+      amount = BigInt(
+        Math.floor(orderSize * price * Math.pow(10, tokenInDecimals)),
+      );
+    } else {
+      // Selling: amount is in tokenIn (what we're selling)
+      amount = BigInt(Math.floor(orderSize * 1e18));
+      // If selling ETH, must send value
+      if (tokenIn === ETH_ADDRESS) {
+        value = amount;
+      }
+    }
+
+    const hash = await client.writeContract({
+      address: DEX_ADDRESS,
+      abi: DEX_ABI,
+      functionName: "placeLimitOrder",
+      args: [tokenIn, tokenOut, isBuy, amount, priceNum, priceDenom],
+      value,
+    });
+    hashes.push(hash);
+  }
+
+  // Wait for all confirmations in parallel
+  await Promise.all(
+    hashes.map((hash) => publicClient.waitForTransactionReceipt({ hash })),
+  );
+}
+
+interface TokenBalances {
+  eth: bigint;
+  usdc: bigint;
+  dai: bigint;
+}
+
+/**
+ * Get token balances for an address
+ */
+async function getBalances(
+  publicClient: PublicClient,
+  address: Address,
+  usdcAddress: Address,
+  daiAddress: Address,
+): Promise<TokenBalances> {
+  const [eth, usdc, dai] = await Promise.all([
+    publicClient.getBalance({ address }),
+    publicClient.readContract({
+      address: usdcAddress,
+      abi: DexToken_ABI,
+      functionName: "balanceOf",
+      args: [address],
+    }) as Promise<bigint>,
+    publicClient.readContract({
+      address: daiAddress,
+      abi: DexToken_ABI,
+      functionName: "balanceOf",
+      args: [address],
+    }) as Promise<bigint>,
+  ]);
+
+  return { eth, usdc, dai };
+}
+
+/**
+ * Print balances in a readable format
+ */
+function printBalances(name: string, balances: TokenBalances): void {
+  console.log(`   ${name}:`);
+  console.log(`     ETH:  ${formatEther(balances.eth)} ETH`);
+  console.log(`     USDC: ${formatUnits(balances.usdc, 6)}`);
+  console.log(`     DAI:  ${formatUnits(balances.dai, 18)}`);
+}
+
+// ============================================================================
+// Main Function
+// ============================================================================
+
 async function main() {
   console.log("=== Enshrined DEX End-to-End Test ===\n");
 
@@ -125,7 +301,6 @@ async function main() {
   console.log(`   Deployer: ${deployerAccount.address}`);
   console.log(`   Alice:    ${aliceAccount.address}`);
 
-  // Create clients
   const publicClient = createPublicClient({
     chain: rethDev,
     transport: http(),
@@ -143,313 +318,232 @@ async function main() {
     transport: http(),
   });
 
-  // Check deployer balance
   const deployerBalance = await publicClient.getBalance({
     address: deployerAccount.address,
   });
   console.log(`   Deployer ETH balance: ${formatEther(deployerBalance)} ETH\n`);
 
-  // 2. Deploy DexToken contracts
+  // 2. Deploy tokens sequentially (nonce management)
   console.log("2. Deploying DexToken contracts...");
+  const usdc = await deployToken(deployerClient, publicClient, {
+    name: "USD Coin",
+    symbol: "USDC",
+    decimals: 6,
+  });
+  const dai = await deployToken(deployerClient, publicClient, {
+    name: "Dai Stablecoin",
+    symbol: "DAI",
+    decimals: 18,
+  });
 
-  // Deploy USDC (6 decimals)
-  const usdcConstructorArgs = encodeAbiParameters(
-    parseAbiParameters("string, string, uint8"),
-    ["USD Coin", "USDC", 6],
+  console.log(`   USDC deployed at: ${usdc.address}`);
+  console.log(`   Explorer: http://localhost:3000/tx/${usdc.deployHash}`);
+  console.log(`   DAI deployed at: ${dai.address}`);
+  console.log(`   Explorer: http://localhost:3000/tx/${dai.deployHash}\n`);
+
+  // 3. Setup: Mint tokens, create pairs, fund Alice
+  console.log("3. Setting up DEX (minting, creating pairs, funding Alice)...");
+
+  // Mint USDC
+  await publicClient.waitForTransactionReceipt({
+    hash: await deployerClient.writeContract({
+      address: usdc.address,
+      abi: DexToken_ABI,
+      functionName: "mint",
+      args: [deployerAccount.address, 1_000_000n * 10n ** 6n],
+    }),
+  });
+
+  // Mint DAI
+  await publicClient.waitForTransactionReceipt({
+    hash: await deployerClient.writeContract({
+      address: dai.address,
+      abi: DexToken_ABI,
+      functionName: "mint",
+      args: [deployerAccount.address, 1_000_000n * 10n ** 18n],
+    }),
+  });
+
+  // Create ETH/USDC pair
+  await publicClient.waitForTransactionReceipt({
+    hash: await deployerClient.writeContract({
+      address: DEX_ADDRESS,
+      abi: DEX_ABI,
+      functionName: "createPair",
+      args: [ETH_ADDRESS, usdc.address],
+    }),
+  });
+
+  // Create ETH/DAI pair
+  await publicClient.waitForTransactionReceipt({
+    hash: await deployerClient.writeContract({
+      address: DEX_ADDRESS,
+      abi: DEX_ABI,
+      functionName: "createPair",
+      args: [ETH_ADDRESS, dai.address],
+    }),
+  });
+
+  // Fund Alice
+  await publicClient.waitForTransactionReceipt({
+    hash: await deployerClient.sendTransaction({
+      to: aliceAccount.address,
+      value: parseEther("10"),
+    }),
+  });
+
+  console.log("   ✓ All setup complete!");
+  console.log(`   View transactions: http://localhost:3000\n`);
+
+  // 4. Place buy orders (orders to buy ETH)
+  console.log("4. Placing buy orders (100 USDC orders, 100 DAI orders)...");
+
+  await placeOrderBatch(deployerClient, publicClient, {
+    tokenIn: usdc.address,
+    tokenOut: ETH_ADDRESS,
+    isBuy: true,
+    priceRange: { min: 2995, max: 3000 },
+    orderSize: 0.1, // 0.1 ETH per order
+    count: 100,
+    tokenInDecimals: 6, // USDC decimals
+  });
+
+  await placeOrderBatch(deployerClient, publicClient, {
+    tokenIn: dai.address,
+    tokenOut: ETH_ADDRESS,
+    isBuy: true,
+    priceRange: { min: 2995, max: 3000 },
+    orderSize: 0.1,
+    count: 100,
+    tokenInDecimals: 18, // DAI decimals
+  });
+
+  console.log("   ✓ Placed 200 buy orders\n");
+
+  // 5. Place sell orders (orders to sell ETH)
+  console.log("5. Placing sell orders (100 USDC orders, 100 DAI orders)...");
+
+  await placeOrderBatch(deployerClient, publicClient, {
+    tokenIn: ETH_ADDRESS,
+    tokenOut: usdc.address,
+    isBuy: false,
+    priceRange: { min: 3002, max: 3007 },
+    orderSize: 0.1,
+    count: 100,
+    tokenInDecimals: 6, // USDC decimals (for price)
+  });
+
+  await placeOrderBatch(deployerClient, publicClient, {
+    tokenIn: ETH_ADDRESS,
+    tokenOut: dai.address,
+    isBuy: false,
+    priceRange: { min: 3002, max: 3007 },
+    orderSize: 0.1,
+    count: 100,
+    tokenInDecimals: 18, // DAI decimals (for price)
+  });
+
+  console.log("   ✓ Placed 200 sell orders\n");
+
+  // 6. Check balances before swaps
+  console.log("6. Checking balances before swaps...");
+  const aliceBalancesBefore = await getBalances(
+    publicClient,
+    aliceAccount.address,
+    usdc.address,
+    dai.address,
   );
-  const usdcDeployData = (DEX_TOKEN_BYTECODE +
-    usdcConstructorArgs.slice(2)) as Hex;
-
-  const usdcDeployHash = await deployerClient.sendTransaction({
-    data: usdcDeployData,
-  });
-  const usdcReceipt = await publicClient.waitForTransactionReceipt({
-    hash: usdcDeployHash,
-  });
-  const usdcAddress = usdcReceipt.contractAddress!;
-  console.log(`   USDC deployed at: ${usdcAddress}`);
-  console.log(`   Explorer: http://localhost:3000/tx/${usdcDeployHash}`);
-
-  // Deploy DAI (18 decimals)
-  const daiConstructorArgs = encodeAbiParameters(
-    parseAbiParameters("string, string, uint8"),
-    ["Dai Stablecoin", "DAI", 18],
+  const deployerBalancesBefore = await getBalances(
+    publicClient,
+    deployerAccount.address,
+    usdc.address,
+    dai.address,
   );
-  const daiDeployData = (DEX_TOKEN_BYTECODE +
-    daiConstructorArgs.slice(2)) as Hex;
 
-  const daiDeployHash = await deployerClient.sendTransaction({
-    data: daiDeployData,
+  printBalances("Alice", aliceBalancesBefore);
+  printBalances("Deployer", deployerBalancesBefore);
+  console.log();
+
+  // Wait for user input before demo
+  console.log("=== SETUP COMPLETE ===");
+  console.log("\nOrderbook is ready with:");
+  console.log("  • 100 USDC buy orders at 2999-3001");
+  console.log("  • 100 DAI buy orders at 2999-3001");
+  console.log("  • 100 USDC sell orders at 3005-3007");
+  console.log("  • 100 DAI sell orders at 3005-3007");
+  console.log(
+    `\nView orderbook: http://localhost:3000/pair/${ETH_ADDRESS}/${usdc.address}`,
+  );
+  console.log("\nPress Enter to execute demo swap...");
+  await new Promise<void>((resolve) => {
+    process.stdin.once("data", () => resolve());
   });
-  const daiReceipt = await publicClient.waitForTransactionReceipt({
-    hash: daiDeployHash,
-  });
-  const daiAddress = daiReceipt.contractAddress!;
-  console.log(`   DAI deployed at: ${daiAddress}`);
-  console.log(`   Explorer: http://localhost:3000/tx/${daiDeployHash}\n`);
 
-  // 3. Mint tokens to deployer
-  console.log("3. Minting tokens to deployer...");
+  // 7. Alice swaps ETH for tokens (matching against many orders)
+  console.log(
+    "\n7. Alice swapping ETH for tokens (matching against 100s of orders)...",
+  );
 
-  const mintUsdcHash = await deployerClient.writeContract({
-    address: usdcAddress,
-    abi: DexToken_ABI,
-    functionName: "mint",
-    args: [deployerAccount.address, 1_000_000n * 10n ** 6n], // 1M USDC
-  });
-  await publicClient.waitForTransactionReceipt({ hash: mintUsdcHash });
-  console.log("   Minted 1,000,000 USDC to deployer");
-  console.log(`   Explorer: http://localhost:3000/tx/${mintUsdcHash}`);
-
-  const mintDaiHash = await deployerClient.writeContract({
-    address: daiAddress,
-    abi: DexToken_ABI,
-    functionName: "mint",
-    args: [deployerAccount.address, 1_000_000n * 10n ** 18n], // 1M DAI
-  });
-  await publicClient.waitForTransactionReceipt({ hash: mintDaiHash });
-  console.log("   Minted 1,000,000 DAI to deployer");
-  console.log(`   Explorer: http://localhost:3000/tx/${mintDaiHash}\n`);
-
-  // 4. Create trading pairs
-  console.log("4. Creating trading pairs...");
-
-  const createEthUsdcHash = await deployerClient.writeContract({
-    address: DEX_ADDRESS,
-    abi: DEX_ABI,
-    functionName: "createPair",
-    args: [ETH_ADDRESS, usdcAddress],
-  });
-  await publicClient.waitForTransactionReceipt({ hash: createEthUsdcHash });
-  console.log("   Created ETH/USDC pair");
-  console.log(`   Explorer: http://localhost:3000/tx/${createEthUsdcHash}`);
-
-  const createEthDaiHash = await deployerClient.writeContract({
-    address: DEX_ADDRESS,
-    abi: DEX_ABI,
-    functionName: "createPair",
-    args: [ETH_ADDRESS, daiAddress],
-  });
-  await publicClient.waitForTransactionReceipt({ hash: createEthDaiHash });
-  console.log("   Created ETH/DAI pair");
-  console.log(`   Explorer: http://localhost:3000/tx/${createEthDaiHash}\n`);
-
-  // 5. Place limit orders (BUY orders - offering to buy ETH with USDC/DAI)
-  // For Alice's market sell (selling ETH) to match, we need BUY orders on the book
-  console.log("5. Placing limit orders (BUY orders for ETH)...");
-
-  // Place BUY order: Buy ETH at 3000 USDC per ETH
-  // tokenIn = USDC (what maker pays), tokenOut = ETH (what maker receives)
-  // isBuy = true, amount = USDC amount, price = 3000 USDC per 1 ETH
-  const placeUsdcOrderHash = await deployerClient.writeContract({
-    address: DEX_ADDRESS,
-    abi: DEX_ABI,
-    functionName: "placeLimitOrder",
-    args: [
-      usdcAddress, // tokenIn (USDC)
-      ETH_ADDRESS, // tokenOut (ETH)
-      true, // isBuy (buying ETH with USDC)
-      30_000n * 10n ** 6n, // amount: 30,000 USDC (enough for 10 ETH)
-      3000n * 10n ** 6n, // priceNum: 3000 USDC
-      10n ** 18n, // priceDenom: 1 ETH
-    ],
-  });
-  await publicClient.waitForTransactionReceipt({ hash: placeUsdcOrderHash });
-  console.log("   Placed BUY order: 10 ETH at 3000 USDC/ETH");
-  console.log(`   Explorer: http://localhost:3000/tx/${placeUsdcOrderHash}`);
-
-  // Place BUY order: Buy ETH at 3000 DAI per ETH
-  const placeDaiOrderHash = await deployerClient.writeContract({
-    address: DEX_ADDRESS,
-    abi: DEX_ABI,
-    functionName: "placeLimitOrder",
-    args: [
-      daiAddress, // tokenIn (DAI)
-      ETH_ADDRESS, // tokenOut (ETH)
-      true, // isBuy (buying ETH with DAI)
-      30_000n * 10n ** 18n, // amount: 30,000 DAI (enough for 10 ETH)
-      3000n * 10n ** 18n, // priceNum: 3000 DAI
-      10n ** 18n, // priceDenom: 1 ETH
-    ],
-  });
-  await publicClient.waitForTransactionReceipt({ hash: placeDaiOrderHash });
-  console.log("   Placed BUY order: 10 ETH at 3000 DAI/ETH");
-  console.log(`   Explorer: http://localhost:3000/tx/${placeDaiOrderHash}\n`);
-
-  // 6. Send ETH to Alice
-  console.log("6. Sending ETH to Alice...");
-  const sendEthHash = await deployerClient.sendTransaction({
-    to: aliceAccount.address,
-    value: parseEther("10"),
-  });
-  await publicClient.waitForTransactionReceipt({ hash: sendEthHash });
-  const aliceEthBalance = await publicClient.getBalance({
-    address: aliceAccount.address,
-  });
-  console.log(`   Alice now has ${formatEther(aliceEthBalance)} ETH`);
-  console.log(`   Explorer: http://localhost:3000/tx/${sendEthHash}\n`);
-
-  // 7. Check initial balances before swaps
-  console.log("7. Checking initial balances before swaps...");
-
-  // Alice's balances
-  const aliceEthBefore = await publicClient.getBalance({
-    address: aliceAccount.address,
-  });
-  const aliceUsdcBefore = (await publicClient.readContract({
-    address: usdcAddress,
-    abi: DexToken_ABI,
-    functionName: "balanceOf",
-    args: [aliceAccount.address],
-  })) as bigint;
-  const aliceDaiBefore = (await publicClient.readContract({
-    address: daiAddress,
-    abi: DexToken_ABI,
-    functionName: "balanceOf",
-    args: [aliceAccount.address],
-  })) as bigint;
-
-  console.log("   Alice:");
-  console.log(`     ETH: ${formatEther(aliceEthBefore)} ETH`);
-  console.log(`     USDC: ${formatUnits(aliceUsdcBefore, 6)}`);
-  console.log(`     DAI: ${formatUnits(aliceDaiBefore, 18)}`);
-
-  // Deployer's balances
-  const deployerEthBefore = await publicClient.getBalance({
-    address: deployerAccount.address,
-  });
-  const deployerUsdcBefore = (await publicClient.readContract({
-    address: usdcAddress,
-    abi: DexToken_ABI,
-    functionName: "balanceOf",
-    args: [deployerAccount.address],
-  })) as bigint;
-  const deployerDaiBefore = (await publicClient.readContract({
-    address: daiAddress,
-    abi: DexToken_ABI,
-    functionName: "balanceOf",
-    args: [deployerAccount.address],
-  })) as bigint;
-
-  console.log("   Deployer:");
-  console.log(`     ETH: ${formatEther(deployerEthBefore)} ETH`);
-  console.log(`     USDC: ${formatUnits(deployerUsdcBefore, 6)}`);
-  console.log(`     DAI: ${formatUnits(deployerDaiBefore, 18)}\n`);
-
-  // 8. Alice swaps ETH for USDC and DAI
-  console.log("8. Alice swapping ETH for tokens...");
-
-  // Swap 1 ETH for USDC
   const swapUsdcHash = await aliceClient.writeContract({
     address: DEX_ADDRESS,
     abi: DEX_ABI,
     functionName: "swap",
-    args: [
-      ETH_ADDRESS, // tokenIn (ETH)
-      usdcAddress, // tokenOut (USDC)
-      parseEther("1"), // amountIn (1 ETH)
-      0n, // minAmountOut (no slippage protection for test)
-    ],
+    args: [ETH_ADDRESS, usdc.address, parseEther("1"), 0n],
     value: parseEther("1"),
   });
   await publicClient.waitForTransactionReceipt({ hash: swapUsdcHash });
-  console.log("   Alice swapped 1 ETH for USDC");
-  console.log(`   Explorer: http://localhost:3000/tx/${swapUsdcHash}`);
 
-  // Swap 1 ETH for DAI
   const swapDaiHash = await aliceClient.writeContract({
     address: DEX_ADDRESS,
     abi: DEX_ABI,
     functionName: "swap",
-    args: [
-      ETH_ADDRESS, // tokenIn (ETH)
-      daiAddress, // tokenOut (DAI)
-      parseEther("1"), // amountIn (1 ETH)
-      0n, // minAmountOut (no slippage protection for test)
-    ],
+    args: [ETH_ADDRESS, dai.address, parseEther("1"), 0n],
     value: parseEther("1"),
   });
   await publicClient.waitForTransactionReceipt({ hash: swapDaiHash });
-  console.log("   Alice swapped 1 ETH for DAI");
-  console.log(`   Explorer: http://localhost:3000/tx/${swapDaiHash}\n`);
 
-  // 9. Verify final balances after swaps
-  console.log("9. Verifying final balances after swaps...");
+  console.log("   ✓ Alice swapped 1 ETH for USDC");
+  console.log(`     Explorer: http://localhost:3000/tx/${swapUsdcHash}`);
+  console.log("   ✓ Alice swapped 1 ETH for DAI");
+  console.log(`     Explorer: http://localhost:3000/tx/${swapDaiHash}\n`);
 
-  // Alice's balances
-  const aliceEthAfter = await publicClient.getBalance({
-    address: aliceAccount.address,
-  });
-  const aliceUsdcAfter = (await publicClient.readContract({
-    address: usdcAddress,
-    abi: DexToken_ABI,
-    functionName: "balanceOf",
-    args: [aliceAccount.address],
-  })) as bigint;
-  const aliceDaiAfter = (await publicClient.readContract({
-    address: daiAddress,
-    abi: DexToken_ABI,
-    functionName: "balanceOf",
-    args: [aliceAccount.address],
-  })) as bigint;
-
-  console.log("   Alice:");
-  console.log(
-    `     ETH: ${formatEther(aliceEthAfter)} ETH (Δ ${formatEther(aliceEthAfter - aliceEthBefore)})`,
+  // 8. Check final balances
+  console.log("8. Checking final balances...");
+  const aliceBalancesAfter = await getBalances(
+    publicClient,
+    aliceAccount.address,
+    usdc.address,
+    dai.address,
   );
-  console.log(
-    `     USDC: ${formatUnits(aliceUsdcAfter, 6)} (Δ +${formatUnits(aliceUsdcAfter - aliceUsdcBefore, 6)})`,
-  );
-  console.log(
-    `     DAI: ${formatUnits(aliceDaiAfter, 18)} (Δ +${formatUnits(aliceDaiAfter - aliceDaiBefore, 18)})`,
+  const deployerBalancesAfter = await getBalances(
+    publicClient,
+    deployerAccount.address,
+    usdc.address,
+    dai.address,
   );
 
-  // Deployer's balances
-  const deployerEthAfter = await publicClient.getBalance({
-    address: deployerAccount.address,
-  });
-  const deployerUsdcAfter = (await publicClient.readContract({
-    address: usdcAddress,
-    abi: DexToken_ABI,
-    functionName: "balanceOf",
-    args: [deployerAccount.address],
-  })) as bigint;
-  const deployerDaiAfter = (await publicClient.readContract({
-    address: daiAddress,
-    abi: DexToken_ABI,
-    functionName: "balanceOf",
-    args: [deployerAccount.address],
-  })) as bigint;
+  printBalances("Alice", aliceBalancesAfter);
+  printBalances("Deployer", deployerBalancesAfter);
+  console.log();
 
-  console.log("   Deployer:");
+  // Summary
+  console.log("=== Summary ===");
+  console.log(`Alice traded 2 ETH and received:`);
   console.log(
-    `     ETH: ${formatEther(deployerEthAfter)} ETH (Δ ${formatEther(deployerEthAfter - deployerEthBefore)})`,
+    `  USDC: ${formatUnits(aliceBalancesAfter.usdc - aliceBalancesBefore.usdc, 6)}`,
   );
   console.log(
-    `     USDC: ${formatUnits(deployerUsdcAfter, 6)} (Δ ${formatUnits(deployerUsdcAfter - deployerUsdcBefore, 6)})`,
+    `  DAI:  ${formatUnits(aliceBalancesAfter.dai - aliceBalancesBefore.dai, 18)}`,
+  );
+  console.log();
+  console.log("View full orderbook visualization:");
+  console.log(
+    `  ETH/USDC: http://localhost:3000/pair/${ETH_ADDRESS}/${usdc.address}`,
   );
   console.log(
-    `     DAI: ${formatUnits(deployerDaiAfter, 18)} (Δ ${formatUnits(deployerDaiAfter - deployerDaiBefore, 18)})\n`,
+    `  ETH/DAI:  http://localhost:3000/pair/${ETH_ADDRESS}/${dai.address}`,
   );
-
-  // Verify results
-  console.log("=== Test Results ===");
-  if (aliceUsdcAfter > 0n && aliceDaiAfter > 0n) {
-    console.log("✅ SUCCESS: All token transfers working correctly!");
-    console.log(
-      `   Alice received: ${formatUnits(aliceUsdcAfter - aliceUsdcBefore, 6)} USDC, ${formatUnits(aliceDaiAfter - aliceDaiBefore, 18)} DAI`,
-    );
-    console.log(
-      `   Alice spent: ~${formatEther(aliceEthBefore - aliceEthAfter)} ETH (including gas)`,
-    );
-    console.log(
-      `   Deployer received: ${formatEther(deployerEthAfter - deployerEthBefore)} ETH from swaps`,
-    );
-  } else {
-    console.log("❌ FAILURE: Alice did not receive expected tokens");
-    if (aliceUsdcAfter === 0n) console.log("   - No USDC received");
-    if (aliceDaiAfter === 0n) console.log("   - No DAI received");
-  }
+  console.log("\n✅ Test completed successfully!");
 }
 
 main().catch(console.error);

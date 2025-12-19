@@ -6,8 +6,25 @@ import {
   formatTimestamp,
   formatValue,
 } from "@/lib/rpc";
+import { getNameTag } from "@/lib/nametags";
 
 export const dynamic = "force-dynamic";
+
+// Mock DEX pairs data - in production this would come from DEX state
+const DEX_PAIRS = [
+  {
+    token0: "0x0000000000000000000000000000000000000000", // ETH
+    token1: "0x5fbdb2315678afecb367f032d93f642f64180aa3", // USDC
+    volume24h: "2 ETH",
+    orders: 100,
+  },
+  {
+    token0: "0x0000000000000000000000000000000000000000", // ETH
+    token1: "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512", // DAI
+    volume24h: "2 ETH",
+    orders: 100,
+  },
+];
 
 export default async function Home() {
   const [blocks, transactions] = await Promise.all([
@@ -27,6 +44,47 @@ export default async function Home() {
       </header>
 
       <main className="max-w-7xl mx-auto px-6 lg:px-8 py-12">
+        {/* DEX Pairs Section */}
+        <div className="mb-6">
+          <div className="bg-white/5 rounded-2xl border border-white/10 overflow-hidden backdrop-blur-sm">
+            <div className="px-6 py-5 border-b border-white/10">
+              <h2 className="text-xl font-semibold text-white">
+                DEX Trading Pairs
+              </h2>
+            </div>
+            <div className="divide-y divide-white/5">
+              {DEX_PAIRS.map((pair, index) => {
+                const token0Name = getNameTag(pair.token0) || truncateHash(pair.token0);
+                const token1Name = getNameTag(pair.token1) || truncateHash(pair.token1);
+                return (
+                  <Link
+                    key={index}
+                    href={`/pair/${pair.token0}/${pair.token1}`}
+                    className="block px-6 py-4 hover:bg-white/5 transition-all duration-200"
+                  >
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="flex-1">
+                        <div className="text-lg font-semibold text-white mb-1">
+                          {token0Name}/{token1Name}
+                        </div>
+                        <div className="text-xs text-white/50">
+                          {pair.orders} open orders
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-sm text-white/90 font-mono">
+                          {pair.volume24h}
+                        </div>
+                        <div className="text-xs text-white/50">24h volume</div>
+                      </div>
+                    </div>
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Recent Blocks */}
           <div className="bg-white/5 rounded-2xl border border-white/10 overflow-hidden backdrop-blur-sm">
@@ -85,9 +143,9 @@ export default async function Home() {
               </h2>
             </div>
             <div className="divide-y divide-white/5">
-              {transactions.map((tx) => (
+              {transactions.map((tx, idx) => (
                 <Link
-                  key={tx.hash}
+                  key={`${tx.hash}-${idx}`}
                   href={`/tx/${tx.hash}`}
                   className="block px-6 py-4 hover:bg-white/5 transition-all duration-200"
                 >

@@ -23,6 +23,11 @@ interface IEnshrinedDEX {
         uint256 priceDenom
     );
     event OrderCancelled(bytes32 indexed orderId, address indexed trader);
+    event OrderFilled(
+        bytes32 indexed makerOrderId,
+        bytes32 indexed takerOrderId,
+        uint256 amount
+    );
     event Swap(
         address indexed trader,
         address indexed tokenIn,
