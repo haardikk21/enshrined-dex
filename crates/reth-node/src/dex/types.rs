@@ -1,6 +1,34 @@
 //! Type definitions for DEX operations.
 
-use alloy_primitives::{Address, B256, U256};
+use crate::selectors::DexToken;
+use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_sol_types::SolCall;
+
+/// A token transfer to be executed via protocolTransfer.
+#[derive(Debug, Clone)]
+pub struct TokenTransfer {
+    /// The token contract address (address(0) for ETH).
+    pub token: Address,
+    /// The sender address.
+    pub from: Address,
+    /// The recipient address.
+    pub to: Address,
+    /// The amount to transfer.
+    pub amount: U256,
+}
+
+impl TokenTransfer {
+    /// Encode this transfer as protocolTransfer calldata.
+    /// protocolTransfer(address from, address to, uint256 amount)
+    pub fn encode_calldata(&self) -> Bytes {
+        let call = DexToken::protocolTransferCall {
+            from: self.from,
+            to: self.to,
+            amount: self.amount,
+        };
+        call.abi_encode().into()
+    }
+}
 
 /// Result of a DEX operation.
 #[derive(Debug, Clone)]
@@ -19,6 +47,8 @@ pub enum DexResult {
         amount: U256,
         price_num: U256,
         price_denom: U256,
+        /// Token transfers for escrowing collateral.
+        transfers: Vec<TokenTransfer>,
     },
     OrderCancelled {
         order_id: B256,
@@ -31,6 +61,8 @@ pub enum DexResult {
         amount_in: U256,
         amount_out: U256,
         route: Vec<B256>,
+        /// Token transfers for the swap.
+        transfers: Vec<TokenTransfer>,
     },
     #[allow(dead_code)]
     Quote {

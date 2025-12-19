@@ -34,7 +34,7 @@ use reth_revm::{
 };
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// DEX-aware Optimism payload builder.
 #[derive(Debug, Clone)]
@@ -134,11 +134,11 @@ where
             .with_bundle_update()
             .build();
 
-        info!(
+        debug!(
             target: "payload_builder",
             parent = ?ctx.parent().hash(),
             parent_number = ctx.parent().number,
-            "Building DEX-aware payload"
+            "Building payload"
         );
 
         // Apply pre-execution changes
@@ -268,12 +268,12 @@ where
 
         let sealed_block = Arc::new(block.seal_slow());
 
-        info!(
+        debug!(
             target: "payload_builder",
             block_hash = ?sealed_block.hash(),
             tx_count = info.executed_transactions.len(),
             gas_used = info.cumulative_gas_used,
-            "Built DEX-aware payload"
+            "Built payload"
         );
 
         let executed = ExecutedBlock {

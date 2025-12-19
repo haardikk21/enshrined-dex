@@ -101,7 +101,7 @@ where
         &mut self,
         kind: PayloadKind,
     ) -> (Self::ResolvePayloadFuture, KeepPayloadJobAlive) {
-        info!(target: "payload_builder", ?kind, "Resolving DEX payload job");
+        debug!(target: "payload_builder", ?kind, "Resolving payload job");
         (
             futures_util::future::ready(self.best_payload()),
             KeepPayloadJobAlive::No,

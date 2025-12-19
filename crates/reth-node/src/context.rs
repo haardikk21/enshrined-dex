@@ -1,6 +1,6 @@
 //! Payload builder context with DEX transaction interception.
 
-use crate::dex::DexHandler;
+use crate::dex::{DexHandler, DexResult, TokenTransfer};
 use crate::primitives::ExecutionInfo;
 use crate::DEX_PREDEPLOY_ADDRESS;
 use alloy_consensus::{transaction::Recovered, Eip658Value, Transaction, Typed2718};
@@ -9,8 +9,10 @@ use alloy_evm::{Database, EvmError};
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{Bytes, U256};
 use op_alloy_consensus::OpDepositReceipt;
+use op_revm::transaction::abstraction::OpTransactionBuilder;
 use op_revm::OpSpecId;
 use reth_basic_payload_builder::PayloadConfig;
+use reth_chainspec::EthChainSpec;
 use reth_evm::{eth::receipt_builder::ReceiptBuilderCtx, ConfigureEvm, Evm, EvmEnv};
 use reth_node_api::{PayloadBuilderAttributes, PayloadBuilderError};
 use reth_optimism_chainspec::OpChainSpec;
@@ -23,6 +25,7 @@ use reth_primitives::SealedHeader;
 use reth_primitives_traits::SignedTransaction;
 use reth_revm::State;
 use revm::context::result::ResultAndState;
+use revm::context::tx::TxEnvBuilder;
 use revm::context_interface::Block as RevmBlock;
 use revm::interpreter::as_u64_saturated;
 use revm::DatabaseCommit;
@@ -126,8 +129,9 @@ impl DexPayloadBuilderCtx {
         }
     }
 
-    fn handle_dex_transaction(
+    fn handle_dex_transaction<DB: Database>(
         &self,
+        db: &mut State<DB>,
         tx: &Recovered<OpTransactionSigned>,
         info: &mut ExecutionInfo,
         gas_used: u64,
@@ -142,18 +146,123 @@ impl DexPayloadBuilderCtx {
             .handle_transaction(sender, &calldata, value)
             .map_err(|e| PayloadBuilderError::Other(Box::new(DexError(e.to_string()))))?;
 
+        // Execute token transfers via protocolTransfer calls
+        let transfers = self.get_transfers(&dex_result);
+        let mut all_logs = Vec::new();
+
+        // Create EVM instance for executing token transfers
+        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+
+        for transfer in &transfers {
+            if transfer.token == alloy_primitives::Address::ZERO {
+                // Handle ETH transfers by executing a simple value transfer transaction
+                debug!(target: "payload_builder",
+                    from = ?transfer.from,
+                    to = ?transfer.to,
+                    amount = ?transfer.amount,
+                    "Executing ETH transfer"
+                );
+
+                let deployer_account_info = evm
+                    .db_mut()
+                    .load_cache_account(DEX_PREDEPLOY_ADDRESS)
+                    .unwrap();
+                let deployer_nonce = deployer_account_info
+                    .account_info()
+                    .unwrap_or_default()
+                    .nonce;
+
+                // Note: ETH inbound (user -> DEX) is already handled by transaction value
+                // We only need to handle outbound (DEX -> user)
+                if transfer.from == DEX_PREDEPLOY_ADDRESS {
+                    let tx_result = evm.transact(
+                        OpTransactionBuilder::new()
+                            .base(
+                                TxEnvBuilder::new()
+                                    .caller(transfer.from)
+                                    .to(transfer.to)
+                                    .nonce(deployer_nonce)
+                                    .chain_id(Some(self.chain_spec.chain_id()))
+                                    .value(transfer.amount),
+                            )
+                            .build_fill(), // .expect("Should be able to build ETH transfer tx"),
+                    );
+
+                    match tx_result {
+                        Ok(result_and_state) => {
+                            // Commit the ETH transfer state changes
+                            evm.db_mut().commit(result_and_state.state);
+                            debug!(target: "payload_builder", "ETH transfer succeeded");
+                        }
+                        Err(err) => {
+                            warn!(target: "payload_builder",
+                                ?err,
+                                to = ?transfer.to,
+                                amount = ?transfer.amount,
+                                "ETH transfer failed"
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let calldata = transfer.encode_calldata();
+            debug!(target: "payload_builder",
+                token = ?transfer.token,
+                from = ?transfer.from,
+                to = ?transfer.to,
+                amount = ?transfer.amount,
+                "Executing protocolTransfer"
+            );
+
+            // Execute the protocolTransfer call as a system call from the DEX address
+            let result = evm.transact_system_call(DEX_PREDEPLOY_ADDRESS, transfer.token, calldata);
+
+            match result {
+                Ok(result_and_state) => {
+                    // Commit the state changes
+                    evm.db_mut().commit(result_and_state.state);
+                    // Collect logs (Transfer events)
+                    all_logs.extend(result_and_state.result.into_logs());
+                    debug!(target: "payload_builder", "protocolTransfer succeeded");
+                }
+                Err(err) => {
+                    warn!(target: "payload_builder",
+                        token = ?transfer.token,
+                        from = ?transfer.from,
+                        to = ?transfer.to,
+                        ?err,
+                        "protocolTransfer failed"
+                    );
+                    // Continue with other transfers even if one fails
+                }
+            }
+        }
+
+        // Add DEX-specific logs
         let dex_logs = self.dex_handler.create_logs(&dex_result);
+        all_logs.extend(dex_logs);
 
         info.cumulative_gas_used += gas_used;
         info.cumulative_da_bytes_used +=
             op_alloy_flz::tx_estimated_size_fjord(tx.encoded_2718().as_slice());
 
-        let receipt = self.build_dex_receipt(info.cumulative_gas_used, dex_logs, deposit_nonce);
+        let receipt = self.build_dex_receipt(info.cumulative_gas_used, all_logs, deposit_nonce);
         info.receipts.push(receipt);
         info.executed_senders.push(sender);
         info.executed_transactions.push(tx.clone().into_inner());
 
         Ok(())
+    }
+
+    /// Extract token transfers from a DexResult.
+    fn get_transfers(&self, result: &DexResult) -> Vec<TokenTransfer> {
+        match result {
+            DexResult::OrderPlaced { transfers, .. } => transfers.clone(),
+            DexResult::SwapExecuted { transfers, .. } => transfers.clone(),
+            _ => Vec::new(),
+        }
     }
 
     /// Execute sequencer transactions from payload attributes.
@@ -193,11 +302,11 @@ impl DexPayloadBuilderCtx {
 
             // Check for DEX transaction
             if sequencer_tx.to() == Some(DEX_PREDEPLOY_ADDRESS) {
-                info!(target: "payload_builder", sender = ?sequencer_tx.signer(), "Processing DEX sequencer transaction");
+                debug!(target: "payload_builder", sender = ?sequencer_tx.signer(), "Processing DEX tx");
 
-                // Execute EVM only to calculate gas - DO NOT commit state.
-                // The DEX is purely in-memory, so we don't want EVM state changes.
-                let ResultAndState { result, .. } = match evm.transact(&sequencer_tx) {
+                // Execute EVM to get gas and state changes (nonce, balance)
+                // We commit state so nonce increments - only the DEX orderbook is in-memory
+                let ResultAndState { result, state } = match evm.transact(&sequencer_tx) {
                     Ok(res) => res,
                     Err(err) => {
                         warn!(target: "payload_builder", ?err, "DEX sequencer transaction EVM failed");
@@ -205,8 +314,12 @@ impl DexPayloadBuilderCtx {
                     }
                 };
 
+                // Commit EVM state (nonce increment, gas payment)
+                evm.db_mut().commit(state);
+
                 if self
                     .handle_dex_transaction(
+                        evm.db_mut(),
                         &sequencer_tx,
                         &mut info,
                         result.gas_used(),
@@ -281,11 +394,11 @@ impl DexPayloadBuilderCtx {
 
             // Check for DEX transaction
             if tx.to() == Some(DEX_PREDEPLOY_ADDRESS) {
-                info!(target: "payload_builder", sender = ?tx.signer(), "Processing DEX pool transaction");
+                debug!(target: "payload_builder", sender = ?tx.signer(), "Processing DEX tx");
 
-                // Execute EVM only to calculate gas - DO NOT commit state.
-                // The DEX is purely in-memory, so we don't want EVM state changes.
-                let ResultAndState { result, .. } = match evm.transact(&tx) {
+                // Execute EVM to get gas and state changes (nonce, balance)
+                // We commit state so nonce increments - only the DEX orderbook is in-memory
+                let ResultAndState { result, state } = match evm.transact(&tx) {
                     Ok(res) => res,
                     Err(err) => {
                         warn!(target: "payload_builder", ?err, "DEX pool tx EVM failed");
@@ -293,8 +406,11 @@ impl DexPayloadBuilderCtx {
                     }
                 };
 
+                // Commit EVM state (nonce increment, gas payment)
+                evm.db_mut().commit(state);
+
                 if self
-                    .handle_dex_transaction(&tx, info, result.gas_used(), None)
+                    .handle_dex_transaction(evm.db_mut(), &tx, info, result.gas_used(), None)
                     .is_ok()
                 {
                     debug!(target: "payload_builder", "DEX transaction executed");

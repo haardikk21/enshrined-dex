@@ -10,6 +10,14 @@ sol!(
     )
 );
 
+sol!(
+    DexToken,
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/out/DexToken.sol/DexToken.json"
+    )
+);
+
 pub mod selectors {
     use super::EnshrinedDEX;
     use alloy_sol_types::SolCall;

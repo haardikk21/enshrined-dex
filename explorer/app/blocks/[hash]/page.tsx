@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { getBlock, getTransaction, truncateHash, formatTimestamp, formatGas } from '@/lib/rpc'
+import { AddressDisplay } from '@/components/AddressDisplay'
 
 export const dynamic = 'force-dynamic'
 
@@ -103,8 +104,8 @@ export default async function BlockPage({ params }: PageProps) {
               {block.miner && (
                 <div className="sm:col-span-2">
                   <dt className="text-sm font-medium text-white/50 mb-2">Miner</dt>
-                  <dd className="text-sm text-white/90 font-mono break-all bg-white/5 p-3 rounded-lg">
-                    {block.miner}
+                  <dd className="text-sm text-white/90 bg-white/5 p-3 rounded-lg">
+                    <AddressDisplay address={block.miner} />
                   </dd>
                 </div>
               )}
@@ -142,12 +143,12 @@ export default async function BlockPage({ params }: PageProps) {
                         <div className="text-sm font-medium text-white font-mono mb-1">
                           {truncateHash(tx.hash)}
                         </div>
-                        <div className="text-xs text-white/50 font-mono">
-                          {truncateHash(tx.from)}
+                        <div className="text-xs text-white/50 flex items-center gap-2">
+                          <AddressDisplay address={tx.from} className="text-white/70" />
                           {tx.to && (
                             <>
-                              {' → '}
-                              {truncateHash(tx.to)}
+                              <span>→</span>
+                              <AddressDisplay address={tx.to} className="text-white/70" />
                             </>
                           )}
                         </div>

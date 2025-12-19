@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { getTransaction, getTransactionReceipt, getBlock, formatValue, formatGas } from '@/lib/rpc'
 import { LogDisplay } from '@/components/LogDisplay'
+import { AddressDisplay } from '@/components/AddressDisplay'
 
 export const dynamic = 'force-dynamic'
 
@@ -100,15 +101,17 @@ export default async function TransactionPage({ params }: PageProps) {
 
               <div>
                 <dt className="text-sm font-medium text-white/50 mb-2">From</dt>
-                <dd className="text-sm text-white/90 font-mono break-all bg-white/5 p-3 rounded-lg">
-                  {tx.from}
+                <dd className="text-sm text-white/90 bg-white/5 p-3 rounded-lg">
+                  <AddressDisplay address={tx.from} />
                 </dd>
               </div>
 
               <div>
                 <dt className="text-sm font-medium text-white/50 mb-2">To</dt>
-                <dd className="text-sm text-white/90 font-mono break-all bg-white/5 p-3 rounded-lg">
-                  {tx.to || (
+                <dd className="text-sm text-white/90 bg-white/5 p-3 rounded-lg">
+                  {tx.to ? (
+                    <AddressDisplay address={tx.to} />
+                  ) : (
                     <span className="text-white/50 italic">
                       Contract Creation
                     </span>
@@ -119,8 +122,8 @@ export default async function TransactionPage({ params }: PageProps) {
               {receipt?.contractAddress && (
                 <div>
                   <dt className="text-sm font-medium text-white/50 mb-2">Contract Address</dt>
-                  <dd className="text-sm text-white/90 font-mono break-all bg-white/5 p-3 rounded-lg">
-                    {receipt.contractAddress}
+                  <dd className="text-sm text-white/90 bg-white/5 p-3 rounded-lg">
+                    <AddressDisplay address={receipt.contractAddress} />
                   </dd>
                 </div>
               )}

@@ -71,19 +71,8 @@ impl PoolManager {
         println!("Checking if pair_id exists in orderbooks...");
 
         if self.orderbooks.contains_key(&pair_id) {
-            println!("ERROR: Pair already exists!");
-            println!("Existing pairs in orderbooks:");
-            for (existing_pair_id, book) in &self.orderbooks {
-                println!(
-                    "  - pair_id={:?}, base={:?}, quote={:?}",
-                    existing_pair_id, book.pair.base, book.pair.quote
-                );
-            }
-            return Err(PoolError::PairAlreadyExists {
-                token0: base,
-                token1: quote,
-                pair_id,
-            });
+            println!("Pair already exists, returning existing pair (idempotent)");
+            return Ok(pair);
         }
 
         println!("Pair does not exist, creating new orderbook");
@@ -604,11 +593,10 @@ mod tests {
         assert_eq!(pair.base, eth);
         assert_eq!(pair.quote, usdc);
 
-        // Can't create duplicate
-        assert!(matches!(
-            pm.create_pair(eth, usdc),
-            Err(PoolError::PairAlreadyExists { .. })
-        ));
+        // Creating duplicate is idempotent - returns success
+        let pair2 = pm.create_pair(eth, usdc).unwrap();
+        assert_eq!(pair2.base, eth);
+        assert_eq!(pair2.quote, usdc);
 
         // Can't create with same token
         assert!(matches!(

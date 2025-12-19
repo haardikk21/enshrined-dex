@@ -4,3 +4,4 @@ mod handler;
 mod types;
 
 pub use handler::DexHandler;
+pub use types::{DexResult, TokenTransfer};

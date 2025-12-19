@@ -14,7 +14,7 @@ use reth_primitives_traits::Block;
 use reth_provider::{BlockReaderIdExt, BlockSource, ChainSpecProvider, StateProviderFactory};
 use reth_transaction_pool::TransactionPool;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, info};
 
 /// Generator that creates DEX-aware payload jobs.
 #[derive(Debug)]
@@ -61,11 +61,11 @@ where
     ) -> Result<Self::Job, PayloadBuilderError> {
         let parent_hash = attributes.parent();
 
-        info!(
+        debug!(
             target: "payload_builder",
             parent = ?parent_hash,
             timestamp = attributes.timestamp(),
-            "Creating new DEX payload job"
+            "Creating DEX payload job"
         );
 
         let parent_block = if parent_hash.is_zero() {

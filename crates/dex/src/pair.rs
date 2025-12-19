@@ -13,10 +13,6 @@ impl PairId {
     /// Create a PairId from two tokens.
     /// The pair ID is the same regardless of token order.
     pub fn from_tokens(token_a: TokenId, token_b: TokenId) -> Self {
-        println!("=== PairId::from_tokens called ===");
-        println!("token_a: {:?}", token_a);
-        println!("token_b: {:?}", token_b);
-
         // Sort tokens to ensure deterministic pair ID regardless of order
         let (first, second) = if token_a <= token_b {
             (token_a, token_b)
@@ -24,15 +20,11 @@ impl PairId {
             (token_b, token_a)
         };
 
-        println!("After sorting: first={:?}, second={:?}", first, second);
-
         // Hash the concatenated addresses
         let mut data = [0u8; 40];
         data[..20].copy_from_slice(first.as_slice());
         data[20..].copy_from_slice(second.as_slice());
         let hash = keccak256(&data);
-
-        println!("Generated pair_id: {:?}", hash);
 
         Self(hash.0)
     }

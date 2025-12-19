@@ -24,6 +24,8 @@ pub struct TradeResult {
 pub struct Fill {
     /// The maker order ID.
     pub maker_order_id: OrderId,
+    /// The maker's address (for token transfers).
+    pub maker: Address,
     /// Amount of base token traded.
     pub base_amount: Amount,
     /// Amount of quote token traded.
@@ -223,7 +225,9 @@ impl OrderBook {
                     .unwrap_or(U256::ZERO);
 
                 // Calculate fees
-                let taker_fee = U256::from(config.calculate_fee(fill_quote_amount.try_into().unwrap_or(u128::MAX)));
+                let taker_fee = U256::from(
+                    config.calculate_fee(fill_quote_amount.try_into().unwrap_or(u128::MAX)),
+                );
                 let maker_fee = U256::ZERO; // Makers typically don't pay fees
 
                 // Execute the fill
@@ -232,6 +236,7 @@ impl OrderBook {
 
                 fills.push(Fill {
                     maker_order_id: maker_order.id,
+                    maker: maker_order.trader,
                     base_amount: fill_base_amount,
                     quote_amount: fill_quote_amount,
                     price: maker_order.price,
@@ -431,7 +436,11 @@ impl OrderBook {
 
     /// Simulate a market buy to get expected output.
     /// Returns (output_amount, average_price) if there's enough liquidity.
-    pub fn simulate_market_buy(&self, input_quote_amount: Amount, config: &DexConfig) -> Option<(Amount, Price)> {
+    pub fn simulate_market_buy(
+        &self,
+        input_quote_amount: Amount,
+        config: &DexConfig,
+    ) -> Option<(Amount, Price)> {
         let mut remaining_quote = input_quote_amount;
         let mut total_base = U256::ZERO;
 
@@ -478,7 +487,11 @@ impl OrderBook {
 
     /// Simulate a market sell to get expected output.
     /// Returns (output_amount, average_price) if there's enough liquidity.
-    pub fn simulate_market_sell(&self, input_base_amount: Amount, config: &DexConfig) -> Option<(Amount, Price)> {
+    pub fn simulate_market_sell(
+        &self,
+        input_base_amount: Amount,
+        config: &DexConfig,
+    ) -> Option<(Amount, Price)> {
         let mut remaining_base = input_base_amount;
         let mut total_quote = U256::ZERO;
 

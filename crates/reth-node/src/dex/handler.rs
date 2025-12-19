@@ -1,6 +1,6 @@
 //! DEX transaction handler.
 
-use super::types::{DexError, DexResult};
+use super::types::{DexError, DexResult, TokenTransfer};
 use crate::selectors::{selectors, EnshrinedDEX};
 use crate::DEX_PREDEPLOY_ADDRESS;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
@@ -100,7 +100,7 @@ impl DexHandler {
         &self,
         caller: Address,
         data: &[u8],
-        _value: U256,
+        value: U256,
     ) -> Result<DexResult, DexError> {
         let (token_in, token_out, is_buy, amount, price_num, price_denom): (
             Address,
@@ -124,6 +124,33 @@ impl DexHandler {
             });
         }
 
+        // Validate ETH value for limit orders
+        // If selling ETH (isBuy=false, tokenIn=ETH), must send ETH value
+        // If buying with ETH (isBuy=true, tokenOut=ETH), must NOT send ETH value (escrow tokenIn instead)
+        if !is_buy && token_in == Address::ZERO {
+            // Selling ETH - must send value equal to amount
+            if value != amount {
+                return Err(DexError::InvalidCalldata(format!(
+                    "ETH value mismatch for sell order: tx.value={}, amount={}",
+                    value, amount
+                )));
+            }
+        } else if is_buy && token_out == Address::ZERO {
+            // Buying ETH - must NOT send value
+            if !value.is_zero() {
+                return Err(DexError::InvalidCalldata(format!(
+                    "Non-zero ETH value sent with buy ETH order: tx.value={}",
+                    value
+                )));
+            }
+        } else if !value.is_zero() {
+            // No ETH involved - must NOT send value
+            return Err(DexError::InvalidCalldata(format!(
+                "Non-zero ETH value sent with non-ETH order: tx.value={}",
+                value
+            )));
+        }
+
         let price_num_u128: u128 = price_num.try_into().map_err(|_| DexError::InvalidPrice {
             num: price_num,
             denom: price_denom,
@@ -135,20 +162,53 @@ impl DexHandler {
             })?;
 
         let price = Price::from_u128(price_num_u128, price_denom_u128);
-        let side = if is_buy {
-            OrderSide::Buy
+
+        // Map Solidity semantics to DEX library semantics:
+        // - Solidity: tokenIn = what caller pays, tokenOut = what caller receives, amount = tokenIn amount
+        // - DEX lib: base = what's being bought/sold, quote = what's used for pricing, amount = base amount
+        //
+        // If isBuy=true: caller wants to BUY tokenOut using tokenIn
+        //   -> base=tokenOut, quote=tokenIn, side=Buy
+        //   -> Need to convert amount from tokenIn (quote) to tokenOut (base) using price
+        // If isBuy=false: caller wants to SELL tokenIn for tokenOut
+        //   -> base=tokenIn, quote=tokenOut, side=Sell
+        //   -> amount is already in tokenIn (base) units
+        let (base, quote, side, base_amount) = if is_buy {
+            // User provides quote amount (tokenIn), convert to base amount (tokenOut)
+            // base_amount = quote_amount / price = quote_amount * price.denominator / price.numerator
+            let base_amt = price.base_amount(amount).ok_or(DexError::InvalidAmount(amount))?;
+            (token_out, token_in, OrderSide::Buy, base_amt)
         } else {
-            OrderSide::Sell
+            // User provides base amount (tokenIn) directly
+            (token_in, token_out, OrderSide::Sell, amount)
         };
 
         let mut pm = self.pool_manager.write();
         let (order_id, _trade_result) = pm
-            .place_limit_order(token_in, token_out, caller, side, price, amount)
+            .place_limit_order(base, quote, caller, side, price, base_amount)
             .map_err(DexError::from)?;
 
         let mut bytes = [0u8; 32];
         bytes[24..32].copy_from_slice(&order_id.0.to_be_bytes());
         let order_id_bytes = B256::from(bytes);
+
+        // Escrow model: transfer collateral from caller to DEX
+        // For limit orders, the caller escrows token_in
+        let transfers = vec![TokenTransfer {
+            token: token_in,
+            from: caller,
+            to: DEX_PREDEPLOY_ADDRESS,
+            amount,
+        }];
+
+        info!(
+            trader = ?caller,
+            token_in = ?token_in,
+            token_out = ?token_out,
+            is_buy = is_buy,
+            amount = ?amount,
+            "Limit order placed with escrow"
+        );
 
         Ok(DexResult::OrderPlaced {
             order_id: order_id_bytes,
@@ -159,6 +219,7 @@ impl DexHandler {
             amount,
             price_num,
             price_denom,
+            transfers,
         })
     }
 
@@ -180,7 +241,7 @@ impl DexHandler {
         &self,
         caller: Address,
         data: &[u8],
-        _value: U256,
+        value: U256,
     ) -> Result<DexResult, DexError> {
         let (token_in, token_out, amount_in, min_amount_out): (Address, Address, U256, U256) =
             <(Address, Address, U256, U256)>::abi_decode(data)
@@ -189,6 +250,30 @@ impl DexHandler {
         if amount_in == U256::ZERO {
             return Err(DexError::InvalidAmount(amount_in));
         }
+
+        // Validate ETH value matches amount_in if swapping ETH
+        if token_in == Address::ZERO {
+            if value != amount_in {
+                return Err(DexError::InvalidCalldata(format!(
+                    "ETH value mismatch: tx.value={}, amount_in={}",
+                    value, amount_in
+                )));
+            }
+        } else if !value.is_zero() {
+            return Err(DexError::InvalidCalldata(format!(
+                "Non-zero ETH value sent with non-ETH swap: tx.value={}",
+                value
+            )));
+        }
+
+        debug!(
+            caller = ?caller,
+            token_in = ?token_in,
+            token_out = ?token_out,
+            amount_in = ?amount_in,
+            min_amount_out = ?min_amount_out,
+            "Executing swap"
+        );
 
         let mut pm = self.pool_manager.write();
         let result = pm
@@ -206,6 +291,65 @@ impl DexHandler {
             })
             .collect();
 
+        // Build token transfers based on fills
+        // Escrow model:
+        // 1. Taker (caller) sends token_in to DEX (or directly to makers)
+        // 2. DEX sends token_out to taker (from maker's escrow)
+        // 3. DEX sends token_in to each maker (their share)
+        let mut transfers = Vec::new();
+
+        // Taker sends token_in to DEX
+        transfers.push(TokenTransfer {
+            token: token_in,
+            from: caller,
+            to: DEX_PREDEPLOY_ADDRESS,
+            amount: amount_in,
+        });
+
+        // DEX sends token_out to taker (total amount_out)
+        transfers.push(TokenTransfer {
+            token: token_out,
+            from: DEX_PREDEPLOY_ADDRESS,
+            to: caller,
+            amount: result.amount_out,
+        });
+
+        // For each hop and fill, determine the correct amount to send to maker
+        for (hop, trade) in result.route.hops.iter().zip(&result.trades) {
+            // Determine which side the taker was on
+            // If pair.base == token_in at this hop, taker is selling base
+            let taker_is_selling_base = hop.pair.base == hop.token_in;
+
+            for fill in &trade.fills {
+                // Maker receives the opposite of what taker is doing:
+                // - If taker sells base (base=token_in), maker receives base_amount (token_in)
+                // - If taker buys base (base=token_out, quote=token_in), maker receives quote_amount (token_in)
+                let amount_to_maker = if taker_is_selling_base {
+                    fill.base_amount  // token_in is base
+                } else {
+                    fill.quote_amount // token_in is quote
+                };
+
+                transfers.push(TokenTransfer {
+                    token: hop.token_in,
+                    from: DEX_PREDEPLOY_ADDRESS,
+                    to: fill.maker,
+                    amount: amount_to_maker,
+                });
+            }
+        }
+
+        info!(
+            caller = ?caller,
+            token_in = ?token_in,
+            token_out = ?token_out,
+            amount_in = ?amount_in,
+            amount_out = ?result.amount_out,
+            hops = route.len(),
+            transfers = transfers.len(),
+            "Swap executed successfully"
+        );
+
         Ok(DexResult::SwapExecuted {
             trader: caller,
             token_in,
@@ -213,6 +357,7 @@ impl DexHandler {
             amount_in,
             amount_out: result.amount_out,
             route,
+            transfers,
         })
     }
 
@@ -276,6 +421,7 @@ impl DexHandler {
                 amount,
                 price_num,
                 price_denom,
+                transfers: _,
             } => {
                 // Non-indexed params: (address tokenOut, bool isBuy, uint256 amount, uint256 priceNum, uint256 priceDenom)
                 let data = (*token_out, *is_buy, *amount, *price_num, *price_denom).abi_encode();
@@ -312,9 +458,29 @@ impl DexHandler {
                 amount_in,
                 amount_out,
                 route,
+                transfers: _,
             } => {
                 // Non-indexed params: (uint256 amountIn, uint256 amountOut, bytes32[] route)
-                let data = (*amount_in, *amount_out, route.as_slice()).abi_encode();
+                // Manually encode to avoid tuple wrapper offset
+                let mut data = Vec::new();
+
+                // amountIn (32 bytes)
+                data.extend_from_slice(&amount_in.to_be_bytes::<32>());
+
+                // amountOut (32 bytes)
+                data.extend_from_slice(&amount_out.to_be_bytes::<32>());
+
+                // offset to array = 0x60 (96 bytes, after amountIn + amountOut + this offset)
+                data.extend_from_slice(&U256::from(0x60).to_be_bytes::<32>());
+
+                // array length
+                data.extend_from_slice(&U256::from(route.len()).to_be_bytes::<32>());
+
+                // array elements
+                for pair_id in route {
+                    data.extend_from_slice(pair_id.as_slice());
+                }
+
                 logs.push(Log {
                     address: DEX_PREDEPLOY_ADDRESS,
                     data: alloy_primitives::LogData::new_unchecked(
